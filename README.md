@@ -2,14 +2,14 @@
 
 PlantHub 面向家庭阳台，采用 ESP32-S3 在设备端运行。产品目标是通过手机、平板或电脑浏览器在家庭局域网内管理植物、查看环境和控制灌溉。
 
-当前阶段为 **M0-B 工程初始化**。仓库提供 ESP32-S3 最小固件、Native 工具链测试和工程规范。首个正式软件版本目标为 `v0.1.0`，用于两盆植物的有人值守原型。
+当前处于 **M0 收口阶段**。仓库提供 ESP32-S3 最小固件、Native 工具链测试和工程规范。首个正式软件版本目标为 `v0.1.0`，用于两盆植物的有人值守原型。
 
 ## 快速开始
 
-准备 Git、用户级 pioarduino Core 6.1.18 和用于 Native 测试的 GCC。在项目根目录使用 PowerShell 执行构建。依赖准备、固定版本及可选 VS Code 接入见[开发指南](docs/DEVELOPMENT.md)。
+准备 Git、pioarduino Core 6.1.18 和用于 Native 测试的 GCC。`PLATFORMIO_CORE_DIR` 指向本机正式工具链目录。在项目根目录使用 PowerShell 执行构建。依赖准备与版本见[开发指南](docs/DEVELOPMENT.md)。
 
 ```powershell
-$plantHubPio = Join-Path $env:USERPROFILE '.platformio\penv\Scripts\pio.exe'
+$plantHubPio = Join-Path $env:PLATFORMIO_CORE_DIR 'penv\Scripts\pio.exe'
 & $plantHubPio run -e planthub_rev_b
 & $plantHubPio test -e native
 ```
