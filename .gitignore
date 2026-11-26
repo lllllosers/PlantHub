@@ -1,5 +1,6 @@
 # PlatformIO
 .pio/
+.platformio/
 .pioenvs/
 .piolibdeps/
 
@@ -51,6 +52,7 @@ Thumbs.db
 Desktop.ini
 
 # Temporary files
+/tatus
 *.tmp
 *.bak
 *.swp
