@@ -1,0 +1,57 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code
+.vscode/
+
+# Build and release artifacts
+build/
+dist/
+release/
+*.elf
+*.bin
+*.map
+*.o
+*.obj
+*.exe
+
+# Python tools
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets.h
+secrets.hpp
+secrets.json
+wifi_credentials.json
+*.local.json
+*.pem
+*.key
+
+# Runtime data
+/data/
+/logs/
+/backups/
+*.log
+
+# Test caches
+.pytest_cache/
+.cache/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+~$*
