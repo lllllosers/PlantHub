@@ -138,9 +138,13 @@ Decision Irrigation::check(const SystemConfig& config, const IrrigationRequest& 
     if (usage == state_.usage.end() && state_.usage.size() >= CriticalState::maxTrackedZones) {
         return {Rejection::Capacity};
     }
-    if (state_.recentWatering.size() >= CriticalState::maxTrackedZones &&
-        std::none_of(state_.recentWatering.begin(), state_.recentWatering.end(),
-                     [&pump](const auto& entry) { return entry.channel == *pump.channel; })) {
+    const auto& recentZones = state_.recentlyWateredZones;
+    const auto& recentChannels = state_.recentlyUsedChannels;
+    if ((recentZones.size() == CriticalState::maxTrackedZones &&
+         std::find(recentZones.begin(), recentZones.end(), zone.id) == recentZones.end() &&
+         configuredRecentZoneCount(config) == CriticalState::maxTrackedZones) ||
+        (recentChannels.size() == CriticalState::maxTrackedChannels &&
+         std::find(recentChannels.begin(), recentChannels.end(), *pump.channel) == recentChannels.end())) {
         return {Rejection::Capacity};
     }
     if (request.dose.volumeMl > *rule.singleLimitMl) {
@@ -170,7 +174,14 @@ Decision Irrigation::check(const SystemConfig& config, const IrrigationRequest& 
     return {};
 }
 
-Decision Irrigation::reserve(IrrigationPlan plan) {
+std::size_t Irrigation::configuredRecentZoneCount(const SystemConfig& config) const {
+    const auto& recentZones = state_.recentlyWateredZones;
+    return std::count_if(recentZones.begin(), recentZones.end(), [&](EntityId id) {
+        return findById(config.zones, id) != nullptr;
+    });
+}
+
+Decision Irrigation::reserve(const SystemConfig& config, IrrigationPlan plan) {
     if (state_.lastExecutionId == std::numeric_limits<ExecutionId>::max()) {
         state_.fault = Fault::IdentityExhausted;
         dirty_ = true;
@@ -180,6 +191,15 @@ Decision Irrigation::reserve(IrrigationPlan plan) {
     if (std::none_of(state_.usage.begin(), state_.usage.end(),
                      [zoneId](const auto& entry) { return entry.zoneId == zoneId; })) {
         state_.usage.push_back({zoneId, plan.channel, 0});
+    }
+    // 已删除分区的稳定 ID 不复用。释放其槽位时仍保留通道的独立灌溉事实。
+    auto& recentZones = state_.recentlyWateredZones;
+    for (auto index = recentZones.size(); index > 0; --index) {
+        const auto entry = index - 1;
+        if (!findById(config.zones, recentZones[entry])) {
+            recentZones.erase(recentZones.begin() + entry);
+            recentZoneEnds_.erase(recentZoneEnds_.begin() + entry);
+        }
     }
     plan.executionId = ++state_.lastExecutionId;
     state_.pending = plan;
@@ -232,7 +252,7 @@ Decision Irrigation::accept(const SystemConfig& config, const IrrigationRequest&
     if (request.source == IrrigationSource::Manual && state_.manualReceipts.size() >= CriticalState::maxManualReceipts) {
         return {Rejection::Capacity};
     }
-    const auto reserved = reserve(plan);
+    const auto reserved = reserve(config, plan);
     if (reserved && request.source == IrrigationSource::Manual) {
         state_.manualReceipts.push_back({request.requestId, 0, {request.dose}});
     }
@@ -279,7 +299,10 @@ Decision Irrigation::acceptGroup(const SystemConfig& config, RequestId id, Entit
     IrrigationPlan first;
     MonotonicMs groupDurationMs = 0;
     std::size_t additionalZones = 0;
-    std::size_t additionalWateringChannels = 0;
+    const auto& recentZones = state_.recentlyWateredZones;
+    const auto& recentChannels = state_.recentlyUsedChannels;
+    std::size_t additionalRecentZones = 0;
+    std::size_t additionalRecentChannels = 0;
     for (const auto& dose : doses) {
         IrrigationPlan plan;
         if (const auto decision = check(config, {id, IrrigationSource::Manual, dose, {}}, plan); !decision) {
@@ -293,19 +316,22 @@ Decision Irrigation::acceptGroup(const SystemConfig& config, RequestId id, Entit
                          [&dose](const auto& entry) { return entry.zoneId == dose.zoneId; })) {
             ++additionalZones;
         }
-        if (std::none_of(state_.recentWatering.begin(), state_.recentWatering.end(),
-                         [&plan](const auto& entry) { return entry.channel == plan.channel; })) {
-            ++additionalWateringChannels;
+        if (std::find(recentZones.begin(), recentZones.end(), dose.zoneId) == recentZones.end()) {
+            ++additionalRecentZones;
+        }
+        if (std::find(recentChannels.begin(), recentChannels.end(), plan.channel) == recentChannels.end()) {
+            ++additionalRecentChannels;
         }
     }
     if (!finishesBefore(groupDurationMs, local_->secondsRemaining)) {
         return {Rejection::CrossesMidnight};
     }
     if (additionalZones + state_.usage.size() > CriticalState::maxTrackedZones ||
-        additionalWateringChannels + state_.recentWatering.size() > CriticalState::maxTrackedZones) {
+        additionalRecentZones + configuredRecentZoneCount(config) > CriticalState::maxTrackedZones ||
+        additionalRecentChannels + recentChannels.size() > CriticalState::maxTrackedChannels) {
         return {Rejection::Capacity};
     }
-    const auto reserved = reserve(first);
+    const auto reserved = reserve(config, first);
     if (reserved) {
         state_.manualReceipts.push_back({id, groupId, std::move(doses)});
         group_ = GroupRun{id, 0, first.quotaDay};
@@ -330,7 +356,7 @@ Decision Irrigation::advanceGroup(const SystemConfig& config) {
         check(config, {receipt.requestId, IrrigationSource::Manual, receipt.doses[group_->member], {}}, next) :
         Decision{Rejection::InvalidRequest};
     if (decision) {
-        decision = reserve(next);
+        decision = reserve(config, next);
     }
     if (!decision) {
         finishGroup(IrrigationResult::Failed);

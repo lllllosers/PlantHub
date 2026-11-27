@@ -184,7 +184,8 @@ void test_stop_during_reservation_save_revokes_start_and_requires_new_save() {
     const auto record = engine.takeRecord();
     TEST_ASSERT_TRUE(record->actualDurationMs == 0 && record->estimatedVolumeMl == 0.0);
     TEST_ASSERT_TRUE(record->result == IrrigationResult::Stopped);
-    TEST_ASSERT_TRUE(engine.state().recentWatering.empty());
+    TEST_ASSERT_TRUE(engine.state().recentlyWateredZones.empty());
+    TEST_ASSERT_TRUE(engine.state().recentlyUsedChannels.empty());
     TEST_ASSERT_TRUE(engine.resumeAutomatic());
     save(engine);
 }
@@ -893,6 +894,42 @@ void test_recovery_charges_unknown_once_preserves_pause_and_rejects_corruption()
     }
 }
 
+void test_cooling_capacity_reclaims_deleted_zones_but_preserves_channels() {
+    auto config = configuration();
+    auto extendedChannels = channels;
+    CriticalState state;
+    state.date = QuotaDate{1, 0, {}, false};
+    state.lastExecutionId = CriticalState::maxTrackedZones;
+    state.recentlyUsedChannels = {1};
+    for (std::size_t index = 0; index < CriticalState::maxTrackedZones; ++index) {
+        const auto id = static_cast<EntityId>(100 + index);
+        const auto channel = static_cast<LogicalChannel>(2 + index);
+        extendedChannels.pumpChannels.push_back(channel);
+        config.pumps.push_back({id, "Spare pump", channel, {}, {}, {}});
+        config.zones.push_back({id, "Spare zone", id, {}, {}});
+        state.recentlyWateredZones.push_back(id);
+    }
+    Irrigation engine(extendedChannels, Recovery::Loaded, 0, state);
+    clock(engine, config, 1, day);
+    expect(Rejection::Capacity, engine.accept(config, manual(1)));
+
+    const auto deleted = config.zones.back().id;
+    config.zones.pop_back();
+    expect(Rejection::Capacity, engine.acceptGroup(config, 1, 41, {10, 10}));
+    TEST_ASSERT_FALSE(engine.activePlan().has_value());
+    expect(Rejection::None, engine.accept(config, manual(1)));
+    complete(engine, start(engine, config));
+    const auto& recentZones = engine.state().recentlyWateredZones;
+    TEST_ASSERT_EQUAL_UINT32(CriticalState::maxTrackedZones, recentZones.size());
+    TEST_ASSERT_TRUE(std::find(recentZones.begin(), recentZones.end(), deleted) == recentZones.end());
+    TEST_ASSERT_TRUE(std::find(recentZones.begin(), recentZones.end(), 31) != recentZones.end());
+    TEST_ASSERT_EQUAL_UINT32(2, engine.state().recentlyUsedChannels.size());
+    TEST_ASSERT_EQUAL_UINT16(1, engine.state().recentlyUsedChannels.front());
+
+    Irrigation rebooted(extendedChannels, Recovery::Loaded, 10, engine.state());
+    TEST_ASSERT_TRUE(rebooted.recoveryStatus() == Recovery::Loaded);
+}
+
 void test_manual_retention_requires_explicit_expiration() {
     const auto config = configuration();
     Irrigation engine(channels, Recovery::FirstInitialization, 0);
@@ -945,6 +982,7 @@ int main() {
     RUN_TEST(test_new_quota_day_cancels_group_after_the_completed_member_is_settled);
     RUN_TEST(test_group_recheck_stop_and_reboot_cancel_remaining_members);
     RUN_TEST(test_recovery_charges_unknown_once_preserves_pause_and_rejects_corruption);
+    RUN_TEST(test_cooling_capacity_reclaims_deleted_zones_but_preserves_channels);
     RUN_TEST(test_manual_retention_requires_explicit_expiration);
     return UNITY_END();
 }

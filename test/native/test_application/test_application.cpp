@@ -205,6 +205,79 @@ void test_config_validation_atomic_save_watermarks_and_accounting_bindings() {
     expect(Rejection::Duplicate, reboot.irrigation().requestManual(101, {1, 20}));
 }
 
+void test_cooling_survives_daily_rollover_channel_swap_and_reuse() {
+    Rig device;
+    device.clock.epoch = referenceDay + 16 * 3'600 - 30;
+    auto config = twoPlants();
+    config.autoIrrigationWindow.enabled = false;
+    config.sampleIntervalMs = 1'000;
+    config.zones[0].rule.cooldownMs.reset();
+    device.configure(config);
+
+    expect(Rejection::None, device.irrigation().requestManual(1, {1, 10}));
+    device.tick(2);
+    device.finishPlanned();
+    const auto firstEnd = device.clock.ms;
+    const auto firstDay = device.engine().state().date->day;
+    for (auto& zone : config.zones) {
+        zone.rule.mode = AutoMode::Smart;
+        zone.rule.consecutiveLowReadings = 1;
+        zone.rule.cooldownMs = 300'000;
+    }
+    device.sensors.raw[1] = 500;
+    expect(ConfigChange::Applied, device.app.replaceConfiguration(config));
+    device.advance(1'000, 3);
+    TEST_ASSERT_EQUAL_UINT32(1, device.pump.permits.size());
+
+    std::swap(config.pumps[0].channel, config.pumps[1].channel);
+    expect(ConfigChange::AccountingBinding, device.app.replaceConfiguration(config));
+    device.advance(31'000, 3);
+    TEST_ASSERT_EQUAL_INT64(firstDay, device.engine().state().date->day);
+    device.advance(60'000, 3);
+    TEST_ASSERT_EQUAL_INT64(firstDay + 1, device.engine().state().date->day);
+    TEST_ASSERT_TRUE(device.engine().state().usage.empty());
+    expect(ConfigChange::Applied, device.app.replaceConfiguration(config));
+
+    device.sensors.raw[1] = 800;
+    device.advance(1'000, 3);
+    // 分区一受原分区冷却，分区二受新绑定通道的冷却。
+    TEST_ASSERT_EQUAL_UINT32(1, device.pump.permits.size());
+    expect(Rejection::None, device.irrigation().requestManual(2, {2, 10}));
+    device.tick(2);
+    TEST_ASSERT_EQUAL_UINT16(1, device.pump.permits.back().plan.channel);
+    device.finishPlanned();
+    TEST_ASSERT_EQUAL_UINT32(90, *device.engine().remaining(2, 100));
+    device.advance(1'000, 3);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2, device.pump.permits.size(), "Zone 1 must still be cooling after channel 1 is reused");
+
+    config.zones[1].rule.mode = AutoMode::Scheduled;
+    config.zones[1].rule.schedule = {{2, 10}};
+    expect(ConfigChange::Applied, device.app.replaceConfiguration(config));
+    device.advance(55'000, 3);
+    TEST_ASSERT_EQUAL_UINT32(3, device.pump.permits.size());
+    TEST_ASSERT_EQUAL_UINT32(2, device.pump.permits.back().plan.request.dose.zoneId);
+    TEST_ASSERT_TRUE(device.pump.permits.back().plan.request.source == IrrigationSource::Scheduled);
+    device.finishPlanned();
+    TEST_ASSERT_EQUAL_UINT32(80, *device.engine().remaining(2, 100));
+
+    Rig reboot;
+    reboot.clock.epoch = *device.clock.now().utc;
+    reboot.runtime.stored = device.runtime.stored;
+    reboot.configs.stored = device.configs.stored;
+    reboot.tick(4);
+    reboot.advance(290'000, 3);
+    TEST_ASSERT_TRUE(reboot.pump.permits.empty());
+    reboot.advance(11'000, 3);
+    TEST_ASSERT_EQUAL_UINT32(1, reboot.pump.permits.size());
+    TEST_ASSERT_EQUAL_UINT32(1, reboot.pump.permits.back().plan.request.dose.zoneId);
+
+    device.advance(firstEnd + 300'001 - device.clock.ms, 3);
+    TEST_ASSERT_EQUAL_UINT32(4, device.pump.permits.size());
+    TEST_ASSERT_EQUAL_UINT32(1, device.pump.permits.back().plan.request.dose.zoneId);
+    TEST_ASSERT_EQUAL_UINT16(2, device.pump.permits.back().plan.channel);
+    TEST_ASSERT_TRUE(device.pump.permits.back().plan.request.source == IrrigationSource::Smart);
+}
+
 void test_stop_cancels_dispatched_permit_and_ignores_repeated_events() {
     Rig device;
     device.configure();
@@ -631,6 +704,7 @@ int main() {
     RUN_TEST(test_smart_rejects_cached_and_failed_samples_and_restarts_after_config_change);
     RUN_TEST(test_auto_window_leaves_monitoring_history_and_manual_independent);
     RUN_TEST(test_config_validation_atomic_save_watermarks_and_accounting_bindings);
+    RUN_TEST(test_cooling_survives_daily_rollover_channel_swap_and_reuse);
     RUN_TEST(test_stop_cancels_dispatched_permit_and_ignores_repeated_events);
     RUN_TEST(test_physically_started_before_revocation_is_accounted_with_actual_stop_time);
     RUN_TEST(test_async_reservation_rechecks_schedule_when_window_closes);

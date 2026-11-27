@@ -44,6 +44,18 @@ bool validReceipt(const ManualReceipt& receipt) {
     return false;
 }
 
+template <typename Identity>
+void updateRecentEnd(std::vector<Identity>& identities, std::vector<MonotonicMs>& ends,
+                     Identity identity, MonotonicMs endMs) {
+    const auto found = std::find(identities.begin(), identities.end(), identity);
+    if (found == identities.end()) {
+        identities.push_back(identity);
+        ends.push_back(endMs);
+    } else {
+        ends[static_cast<std::size_t>(found - identities.begin())] = endMs;
+    }
+}
+
 }  // namespace
 
 Irrigation::Irrigation(ChannelCapabilities channels, Recovery recovery, MonotonicMs bootMs, CriticalState state)
@@ -63,7 +75,8 @@ Irrigation::Irrigation(ChannelCapabilities channels, Recovery recovery, Monotoni
     }
 
     // 单调时钟跨重启不可比，每条记录从本次启动重新等待完整冷却。
-    recentEnds_.assign(state_.recentWatering.size(), bootMs);
+    recentZoneEnds_.assign(state_.recentlyWateredZones.size(), bootMs);
+    recentChannelEnds_.assign(state_.recentlyUsedChannels.size(), bootMs);
     recoverPending();
     for (auto& receipt : state_.manualReceipts) {
         if (receipt.stage != RequestStage::Ended) {
@@ -85,7 +98,8 @@ bool Irrigation::validState() const {
                channels_.pumpChannels.end();
     };
     if (!validFault(state_.fault) || state_.usage.size() > CriticalState::maxTrackedZones ||
-        state_.recentWatering.size() > CriticalState::maxTrackedZones ||
+        state_.recentlyWateredZones.size() > CriticalState::maxTrackedZones ||
+        state_.recentlyUsedChannels.size() > CriticalState::maxTrackedChannels ||
         state_.manualReceipts.size() > CriticalState::maxManualReceipts) {
         return false;
     }
@@ -98,7 +112,8 @@ bool Irrigation::validState() const {
             return false;
         }
     } else if (!state_.usage.empty() || state_.pending || state_.lastExecutionId != 0 ||
-               !state_.manualReceipts.empty() || !state_.recentWatering.empty()) {
+               !state_.manualReceipts.empty() || !state_.recentlyWateredZones.empty() ||
+               !state_.recentlyUsedChannels.empty()) {
         return false;
     }
 
@@ -110,11 +125,18 @@ bool Irrigation::validState() const {
             return false;
         }
     }
-    for (auto it = state_.recentWatering.begin(); it != state_.recentWatering.end(); ++it) {
-        if (!it->zoneId || !validChannel(it->channel) ||
-            std::any_of(state_.recentWatering.begin(), it, [&](const auto& earlier) {
-                return earlier.channel == it->channel;
-            })) {
+    const auto& recentZones = state_.recentlyWateredZones;
+    const auto& recentChannels = state_.recentlyUsedChannels;
+    if (!recentZones.empty() && recentChannels.empty()) {
+        return false;
+    }
+    for (auto it = recentZones.begin(); it != recentZones.end(); ++it) {
+        if (!*it || std::find(recentZones.begin(), it, *it) != it) {
+            return false;
+        }
+    }
+    for (auto it = recentChannels.begin(); it != recentChannels.end(); ++it) {
+        if (!validChannel(*it) || std::find(recentChannels.begin(), it, *it) != it) {
             return false;
         }
     }
@@ -145,9 +167,10 @@ bool Irrigation::validState() const {
         std::none_of(state_.usage.begin(), state_.usage.end(), [&](const auto& entry) {
             return entry.zoneId == request.dose.zoneId && entry.channel == plan.channel;
         }) ||
-        (state_.recentWatering.size() == CriticalState::maxTrackedZones &&
-         std::none_of(state_.recentWatering.begin(), state_.recentWatering.end(),
-                      [&](const auto& entry) { return entry.channel == plan.channel; }))) {
+        (recentZones.size() == CriticalState::maxTrackedZones &&
+         std::find(recentZones.begin(), recentZones.end(), request.dose.zoneId) == recentZones.end()) ||
+        (recentChannels.size() == CriticalState::maxTrackedChannels &&
+         std::find(recentChannels.begin(), recentChannels.end(), plan.channel) == recentChannels.end())) {
         return false;
     }
 
@@ -209,22 +232,15 @@ std::optional<IrrigationRecord> Irrigation::takeRecord() {
 }
 
 void Irrigation::rememberWatering(const IrrigationPlan& plan, MonotonicMs endMs) {
-    const auto match = std::find_if(state_.recentWatering.begin(), state_.recentWatering.end(),
-                                    [&](const auto& entry) { return entry.channel == plan.channel; });
-    const RecentWatering recent{plan.request.dose.zoneId, plan.channel};
-    if (match == state_.recentWatering.end()) {
-        state_.recentWatering.push_back(recent);
-        recentEnds_.push_back(endMs);
-    } else {
-        recentEnds_[static_cast<std::size_t>(match - state_.recentWatering.begin())] = endMs;
-        *match = recent;
-    }
+    const auto zoneId = plan.request.dose.zoneId;
+    updateRecentEnd(state_.recentlyWateredZones, recentZoneEnds_, zoneId, endMs);
+    updateRecentEnd(state_.recentlyUsedChannels, recentChannelEnds_, plan.channel, endMs);
     const auto progress = std::find_if(soil_.begin(), soil_.end(),
-                                       [&](const auto& entry) { return entry.zoneId == recent.zoneId; });
+                                       [zoneId](const auto& entry) { return entry.zoneId == zoneId; });
     if (progress != soil_.end()) {
-        *progress = SoilProgress{recent.zoneId};
+        *progress = SoilProgress{zoneId};
     }
-    cancelCandidate(recent.zoneId, IrrigationSource::Smart);
+    cancelCandidate(zoneId, IrrigationSource::Smart);
 }
 
 }  // namespace planthub::core

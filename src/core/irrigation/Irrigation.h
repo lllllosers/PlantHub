@@ -90,11 +90,6 @@ struct QuotaDate {
     bool schedulesSuspended = false;
 };
 
-struct RecentWatering {
-    EntityId zoneId = 0;
-    LogicalChannel channel = 0;
-};
-
 struct ManualReceipt {
     RequestId requestId = 0;
     EntityId groupId = 0;
@@ -105,6 +100,7 @@ struct ManualReceipt {
 
 struct CriticalState {
     static constexpr std::size_t maxTrackedZones = 16;
+    static constexpr std::size_t maxTrackedChannels = 16;
     static constexpr std::size_t maxManualReceipts = 8;
 
     std::optional<QuotaDate> date;
@@ -112,7 +108,9 @@ struct CriticalState {
     // 计划目标量即唯一的未结算预留。usedMl 只包含已结算水量。
     std::optional<IrrigationPlan> pending;
     ExecutionId lastExecutionId = 0;
-    std::vector<RecentWatering> recentWatering;
+    // 分区与通道分别保持最近灌溉事实。单调结束时刻只在本次启动中有效。
+    std::vector<EntityId> recentlyWateredZones;
+    std::vector<LogicalChannel> recentlyUsedChannels;
     std::vector<ManualReceipt> manualReceipts;
     bool autoPaused = false;
     Fault fault = Fault::None;
@@ -222,7 +220,8 @@ private:
     void addCandidate(IrrigationRequest request);
     Decision check(const SystemConfig& config, const IrrigationRequest& request, IrrigationPlan& plan,
                    bool beforeStart = false) const;
-    Decision reserve(IrrigationPlan plan);
+    std::size_t configuredRecentZoneCount(const SystemConfig& config) const;
+    Decision reserve(const SystemConfig& config, IrrigationPlan plan);
     Decision duplicate(RequestId id, EntityId groupId, const std::vector<ZoneDose>& doses) const;
     void finishGroup(IrrigationResult result);
     void enforceDeadline(MonotonicMs now);
@@ -253,7 +252,8 @@ private:
     std::optional<LocalTime> local_;
     std::optional<Trigger> scheduleWindow_;
     std::int16_t offsetMinutes_ = 0;
-    std::vector<MonotonicMs> recentEnds_;
+    std::vector<MonotonicMs> recentZoneEnds_;
+    std::vector<MonotonicMs> recentChannelEnds_;
     std::vector<SoilProgress> soil_;
     std::vector<IrrigationRequest> candidates_;
 };

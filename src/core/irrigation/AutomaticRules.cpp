@@ -186,14 +186,17 @@ void Irrigation::observeSchedule(const SystemConfig& config, bool continuous, bo
 }
 
 bool Irrigation::cooling(const IrrigationZone& zone, LogicalChannel channel, MonotonicMs atMs) const {
-    for (std::size_t index = 0; index < state_.recentWatering.size(); ++index) {
-        const auto& recent = state_.recentWatering[index];
-        if ((recent.zoneId == zone.id || recent.channel == channel) &&
-            (atMs <= recentEnds_[index] || atMs - recentEnds_[index] < zone.rule.cooldownMs.value_or(0))) {
-            return true;
+    const auto duration = zone.rule.cooldownMs.value_or(0);
+    const auto stillCooling = [atMs, duration](const auto& identities, const auto& ends, auto identity) {
+        const auto found = std::find(identities.begin(), identities.end(), identity);
+        if (found == identities.end()) {
+            return false;
         }
-    }
-    return false;
+        const auto end = ends[static_cast<std::size_t>(found - identities.begin())];
+        return atMs <= end || atMs - end < duration;
+    };
+    return stillCooling(state_.recentlyWateredZones, recentZoneEnds_, zone.id) ||
+           stillCooling(state_.recentlyUsedChannels, recentChannelEnds_, channel);
 }
 
 void Irrigation::observeSoil(const SystemConfig& config, EntityId zoneId, const SensorReading* reading) {
