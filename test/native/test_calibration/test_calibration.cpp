@@ -207,6 +207,12 @@ void test_estimates_distinguish_zero_from_unknown() {
     TEST_ASSERT_TRUE(record.result == IrrigationResult::Unknown);
 }
 
+void test_delivery_charge_rounds_up_even_when_the_estimate_rounds_down() {
+    const auto delivery = estimateDelivery(62'500.00390625f, 4'090'240'001);
+    TEST_ASSERT_TRUE(delivery->volumeMl == 4'260'666'934.0);
+    TEST_ASSERT_TRUE(delivery->chargeMl == 4'260'666'935u);
+}
+
 }  // namespace
 
 void setUp() {}
@@ -225,5 +231,6 @@ int main() {
     RUN_TEST(test_duration_rejects_invalid_input_and_checks_integer_boundary);
     RUN_TEST(test_duration_respects_limits_when_division_rounds_to_integer);
     RUN_TEST(test_estimates_distinguish_zero_from_unknown);
+    RUN_TEST(test_delivery_charge_rounds_up_even_when_the_estimate_rounds_down);
     return UNITY_END();
 }

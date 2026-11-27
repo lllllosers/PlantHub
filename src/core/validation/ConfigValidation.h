@@ -55,6 +55,7 @@ enum class ZoneReadiness {
     InvalidConfig,
     UnknownZone,
     MissingPumpCalibration,
+    NoEnabledPlants,
     MissingPumpLimits,
     MissingDoseLimits,
     IncompleteSchedule,

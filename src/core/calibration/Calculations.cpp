@@ -137,4 +137,22 @@ std::optional<double> estimateVolumeMl(float flowMlPerMin, std::optional<Duratio
     return static_cast<double>(flowMlPerMin) * *actualDurationMs / millisecondsPerMinute;
 }
 
+std::optional<DeliveryEstimate> estimateDelivery(float flowMlPerMin, DurationMs actualDurationMs) {
+    const auto estimate = estimateVolumeMl(flowMlPerMin, actualDurationMs);
+    if (!estimate) {
+        return std::nullopt;
+    }
+    auto rounded = std::ceil(*estimate);
+    if (rounded <= std::numeric_limits<VolumeMl>::max() &&
+        std::fma(flowMlPerMin, static_cast<double>(actualDurationMs), -rounded * millisecondsPerMinute) > 0.0) {
+        // 估算值恰好舍入到整数时，仍向上记账。
+        ++rounded;
+    }
+    DeliveryEstimate delivery{*estimate, std::nullopt};
+    if (rounded <= std::numeric_limits<VolumeMl>::max()) {
+        delivery.chargeMl = static_cast<VolumeMl>(rounded);
+    }
+    return delivery;
+}
+
 }  // namespace planthub::core

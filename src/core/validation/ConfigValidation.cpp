@@ -12,13 +12,6 @@ namespace {
 constexpr int minutesPerDay = 24 * 60;
 
 template <typename Entity>
-const Entity* findById(const std::vector<Entity>& entities, EntityId id) {
-    const auto found = std::find_if(entities.begin(), entities.end(),
-                                    [id](const Entity& entity) { return entity.id == id; });
-    return found == entities.end() ? nullptr : &*found;
-}
-
-template <typename Entity>
 ConfigError validateIdentity(const std::vector<Entity>& entities, const Entity& entity) {
     if (entity.id == 0) {
         return ConfigError::InvalidId;
@@ -35,7 +28,7 @@ ConfigError validateIdentity(const std::vector<Entity>& entities, const Entity& 
 template <typename Entity>
 ConfigError validateChannel(const std::vector<LogicalChannel>& available, const std::vector<Entity>& entities,
                             const Entity& entity) {
-    if (std::find(available.begin(), available.end(), entity.channel) == available.end()) {
+    if (!entity.channel || std::find(available.begin(), available.end(), *entity.channel) == available.end()) {
         return ConfigError::UnavailableChannel;
     }
     const auto first = std::find_if(entities.begin(), entities.end(), [&entity](const Entity& candidate) {
@@ -211,6 +204,10 @@ ZoneReadiness checkZoneReadiness(const SystemConfig& config, const ChannelCapabi
     const auto* zone = findById(config.zones, zoneId);
     if (!zone) {
         return ZoneReadiness::UnknownZone;
+    }
+    const auto enabledInZone = [zoneId](const Plant& plant) { return plant.enabled && plant.zoneId == zoneId; };
+    if (std::none_of(config.plants.begin(), config.plants.end(), enabledInZone)) {
+        return ZoneReadiness::NoEnabledPlants;
     }
 
     const auto& pump = *findById(config.pumps, zone->pumpId);

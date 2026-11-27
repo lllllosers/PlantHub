@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -15,9 +16,17 @@ using VolumeMl = std::uint32_t;
 using DurationMs = std::uint32_t;
 using MonotonicMs = std::uint64_t;
 using UtcSeconds = std::int64_t;
+using ExecutionId = std::uint64_t;
+
+template <typename Entity>
+const Entity* findById(const std::vector<Entity>& entities, EntityId id) {
+    const auto found = std::find_if(entities.begin(), entities.end(),
+                                    [id](const Entity& entity) { return entity.id == id; });
+    return found == entities.end() ? nullptr : &*found;
+}
 
 struct Plant {
-    EntityId id;
+    EntityId id = 0;
     std::string name;
     bool enabled = true;
     std::optional<EntityId> soilSensorId;
@@ -25,23 +34,23 @@ struct Plant {
 };
 
 struct SoilCalibration {
-    AdcCount dryRaw;
-    AdcCount wetRaw;
+    AdcCount dryRaw = 0;
+    AdcCount wetRaw = 0;
 
     bool isValid() const { return dryRaw != wetRaw; }
 };
 
 struct SoilSensor {
-    EntityId id;
+    EntityId id = 0;
     std::string name;
-    LogicalChannel channel;
+    std::optional<LogicalChannel> channel;
     std::optional<SoilCalibration> calibration;
 };
 
 struct PumpChannel {
-    EntityId id;
+    EntityId id = 0;
     std::string name;
-    LogicalChannel channel;
+    std::optional<LogicalChannel> channel;
     std::optional<float> flowMlPerMin;
     std::optional<DurationMs> minDurationMs;
     std::optional<DurationMs> maxDurationMs;
@@ -50,7 +59,7 @@ struct PumpChannel {
 enum class AutoMode { Off, Scheduled, Smart };
 
 struct ScheduledDose {
-    std::uint16_t minuteOfDay;
+    std::uint16_t minuteOfDay = 1440;
     std::optional<VolumeMl> targetVolumeMl;
 };
 
@@ -66,15 +75,15 @@ struct IrrigationRule {
 };
 
 struct IrrigationZone {
-    EntityId id;
+    EntityId id = 0;
     std::string name;
-    EntityId pumpId;
+    EntityId pumpId = 0;
     std::optional<EntityId> representativeSensorId;
     IrrigationRule rule;
 };
 
 struct IrrigationGroup {
-    EntityId id;
+    EntityId id = 0;
     std::string name;
     std::vector<EntityId> zoneIds;
 };
@@ -82,7 +91,7 @@ struct IrrigationGroup {
 enum class ReadingStatus { Missing, AcquisitionFailed, Invalid, Uncalibrated, OutOfRange, Stale, Valid };
 
 struct SoilReading {
-    EntityId sensorId;
+    EntityId sensorId = 0;
     std::optional<AdcCount> raw;
     std::optional<float> moisturePercent;
     ReadingStatus status = ReadingStatus::Missing;
@@ -96,24 +105,27 @@ struct AirReading {
 };
 
 struct SensorReading {
-    MonotonicMs sampledAtMs;
+    MonotonicMs sampledAtMs = 0;
     std::optional<UtcSeconds> sampledAtUtcSeconds;
     std::variant<SoilReading, AirReading> data;
 };
 
 enum class IrrigationSource { Manual, Scheduled, Smart };
 enum class IrrigationResult { Unknown, Completed, Stopped, Failed };
+enum class StopReason { None, Planned, Manual, MaximumDuration, ClockFault, DeviceFault, Interrupted };
 
 struct IrrigationRecord {
-    EntityId zoneId;
-    EntityId pumpId;
-    IrrigationSource source;
-    VolumeMl targetVolumeMl;
-    float flowMlPerMin;
+    EntityId zoneId = 0;
+    EntityId pumpId = 0;
+    IrrigationSource source = IrrigationSource::Manual;
+    VolumeMl targetVolumeMl = 0;
+    float flowMlPerMin = 0;
     std::optional<DurationMs> actualDurationMs;
     std::optional<double> estimatedVolumeMl;
     std::optional<UtcSeconds> startedAtUtcSeconds;
     IrrigationResult result = IrrigationResult::Unknown;
+    ExecutionId executionId = 0;
+    StopReason stopReason = StopReason::None;
 };
 
 struct SystemConfig {
