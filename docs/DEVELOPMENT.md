@@ -6,9 +6,9 @@
 
 固件平台、Native 平台和 Unity 的版本由 [platformio.ini](../platformio.ini) 固定。pioarduino 的版本清单固定 Arduino-ESP32 3.3.6、SDK 库包 `5.5.0+sha.f56bea3d1f` 和 Xtensa GCC `14.2.0+20251107`。库包标签用于标识分发包。S3 SDK 的 ESP-IDF 版本以 `esp_idf_version.h` 为准，当前为 5.5.2。[Arduino 发布说明](https://github.com/espressif/arduino-esp32/releases/tag/3.3.6)
 
-Windows Native 测试使用 [WinLibs GCC](https://winlibs.com/) 或可用的 MinGW-w64 GCC。用 `where.exe gcc`、`where.exe g++`、`gcc --version` 和 `g++ --version` 核对测试终端实际使用的编译器。刚添加 `PATH` 时，重启 VS Code 或开发会话以继承新的环境。主机 GCC 与 Xtensa GCC 各自编译对应目标，项目源码统一使用 C++17。
+Windows Native 测试使用 [WinLibs GCC](https://winlibs.com/) 或可用的 MinGW-w64 GCC。用 `where.exe gcc`、`where.exe g++`、`gcc --version` 和 `g++ --version` 核对测试终端实际使用的编译器。若测试程序出现 `0xC0000139`，用 `where.exe libwinpthread-1.dll` 核对运行库的搜索顺序，测试终端应优先使用同一套 GCC 的运行库。刚添加 `PATH` 时，重启 VS Code 或开发会话以继承新的环境。主机 GCC 与 Xtensa GCC 各自编译对应目标，项目源码统一使用 C++17。
 
-M0 使用上述 CLI 构建和验收。VS Code 可用于编辑，官方 PlatformIO IDE 扩展在本阶段保持禁用。
+阶段构建与验收统一使用上述 CLI。VS Code 可用于编辑，官方 PlatformIO IDE 扩展保持禁用。
 
 ## 工具安装权限
 
@@ -32,15 +32,15 @@ $plantHubPio = Join-Path $env:PLATFORMIO_CORE_DIR 'penv\Scripts\pio.exe'
 & $plantHubPio test -e native
 ```
 
-- `planthub_rev_b` 编译 `src/` 中的固件源码。嵌入式测试筛选在 `test/embedded/` 下，随实物验证需求添加。M0-B 的 `main.cpp` 只完成 Arduino 入口及空闲等待。
-- `native` 以测试命令为入口。M0-B 项目源码筛选为 `src/core/`，测试筛选为 `test/native/`，工具链冒烟测试使用 Unity 和标准 C++。M1 引入可移植的 Application 服务后，按实际用途将其纳入 Native 编译和测试范围。
+- `planthub_rev_b` 编译 `src/` 中的固件源码。嵌入式测试筛选在 `test/embedded/` 下，随实物验证需求添加。当前 `main.cpp` 只完成 Arduino 入口及空闲等待，链接器可移除未被引用的 Core 实现。
+- `native` 以测试命令为入口，编译 `src/core/` 并运行 `test/native/` 下的 Unity 测试。M1-A 的配置与标定用例直接链接正式 Core 源码，工具链冒烟测试继续核对 C++17 和 Unity。M1-C 引入可移植的 Application 服务后，按实际用途将其纳入 Native 编译和测试范围。
 - 两个环境都通过编译期断言核验 C++17。固件使用 `-std=gnu++17`，以支持 ESP-IDF 头文件的 `typeof` 和 FreeRTOS 的可变参数宏扩展。Native 使用 `-std=c++17` 验证可移植源码。固件构建须检查 APP 限额、Flash/RAM 和警告，使用框架分区工具核对 [分区文件](../partitions.csv) 及生成的表。主机测试须检查编译器、测试计数及实际编译的源码。
 - 工具链迁移验收先执行 `& $plantHubPio run -e planthub_rev_b -e native -t clean` 清理两项构建产物，再运行上面的构建和测试，核对实际编译命令。保留 `.pio/libdeps/` 中的项目库缓存。
 - 硬件候选配置及实物验收范围见 [Rev B 硬件基线](../hardware/rev-b/README.md)。烧录和实物试验按其中的授权约束执行。
 
 ## Git 与版本
 
-`main` 为长期主分支，按阶段开设短期英文分支。M0-B 使用 `feat/m0-foundation`。阶段验收后，经项目负责人授权合并及清理分支。提交说明使用简体中文，阶段进度记入 [ROADMAP.md](ROADMAP.md)，版本变更记入 [CHANGELOG.md](../CHANGELOG.md)。硬件与软件各自管理版本，正式软件 Tag 使用语义化版本。普通阶段提交无需 Tag。禁止擅自改写历史、删除正式发布记录或清理用户未提交工作。
+`main` 为长期主分支，按阶段开设短期英文分支。M1-A、M1-B 和 M1-C 共用 `feat/m1-core-business`。阶段验收后，经项目负责人授权合并及清理分支。提交说明使用简体中文，阶段进度记入 [ROADMAP.md](ROADMAP.md)，版本变更记入 [CHANGELOG.md](../CHANGELOG.md)。硬件与软件各自管理版本，正式软件 Tag 使用语义化版本。普通阶段提交无需 Tag。禁止擅自改写历史、删除正式发布记录或清理用户未提交工作。
 
 提交前运行 `git diff --check`、`git diff --cached --check`、`git status`、`git log -1 --oneline` 和 `git branch -a`。只暂存任务范围内的文件，并检查暂存清单、差异和最终提交内容。公开仓库严禁提交 Wi-Fi 密码、设备密码、Token、私钥或真实个人网络配置。
 

@@ -14,6 +14,8 @@ PlantHub 在 ESP32 上运行轻量分层模块化单体。可信家庭局域网�
 
 依赖保持单向，普通计算、数据模型、校验和状态机直接使用函数、结构体或具体类。前端位于 `frontend/`，业务访问统一走 HTTP API。M0-B 创建实际使用的入口、板级配置与测试，其他模块随用例落地。
 
+Core 以调用方提供的可用逻辑通道校验业务配置。后续设备适配由板级配置提供已启用通道的映射，由驱动判定 ADC 量程和采集状态。配置校验返回业务错误及相关实体，静态就绪检查评估指定灌溉来源所需的配置，应用服务负责模式启用和运行条件。业务关系和就绪条件见 [产品规范](PRODUCT_SPEC.md#模型与关系)。
+
 ## 灌溉执行
 
 手动、定时和智能请求共用 Application 入口，依次检查条件、持久化预留额度及执行凭据、启动、停止和保存结果。Core 提供条件判断及状态转换。产品约束详见 [灌溉规则](PRODUCT_SPEC.md#灌溉规则)。
@@ -28,7 +30,7 @@ NVS / Preferences 保存配置、标定、网络凭据和关键运行状态。�
 
 ## REST API 规划
 
-接口使用 `/api/v1/`，API 版本独立于固件版本。HTTP 和 JSON 转换由 Web 层处理。业务及访问约束见[产品规范](PRODUCT_SPEC.md)。M0-B 固件仅用于构建验证。
+接口使用 `/api/v1/`，API 版本独立于固件版本。HTTP 和 JSON 转换由 Web 层处理。业务及访问约束见[产品规范](PRODUCT_SPEC.md)。当前最小固件用于构建验证。
 
 | 方法 | 路径（相对 `/api/v1`） | 用途 |
 | --- | --- | --- |
@@ -40,7 +42,7 @@ NVS / Preferences 保存配置、标定、网络凭据和关键运行状态。�
 | GET、PUT | `/pumps/{id}` | 查询水泵与修改标定配置 |
 | GET、POST | `/zones` | 列表、新增分区 |
 | GET、POST | `/groups` | 列表、新增分组 |
-| GET、PUT | `/rules/{id}` | 查询、更新规则 |
+| GET、PUT | `/zones/{id}/rule` | 查询、更新分区规则 |
 | POST | `/irrigation/requests` | 受理灌溉请求 |
 | POST | `/irrigation/stop` | 优先停止灌溉 |
 | GET | `/irrigation/status` | 查询执行状态 |
