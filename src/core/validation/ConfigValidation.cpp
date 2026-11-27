@@ -102,6 +102,10 @@ ConfigValidation validateConfig(const SystemConfig& config, const ChannelCapabil
     if (config.utcOffsetMinutes <= -minutesPerDay || config.utcOffsetMinutes >= minutesPerDay) {
         return {ConfigError::InvalidUtcOffset};
     }
+    const auto& window = config.autoIrrigationWindow;
+    if (window.startMinute >= window.endMinute || window.endMinute > minutesPerDay) {
+        return {ConfigError::InvalidAutoIrrigationWindow};
+    }
 
     for (const auto& sensor : config.soilSensors) {
         if (const auto error = validateIdentity(config.soilSensors, sensor); error != ConfigError::None) {

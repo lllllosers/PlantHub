@@ -68,6 +68,15 @@ void Irrigation::observeTime(const SystemConfig& config, ClockSample sample) {
         clearAutomatic();
         return;
     }
+    const auto& window = config.autoIrrigationWindow;
+    const bool autoAllowed = window.allows(local_->minute);
+    if (previousLocal && (autoAllowed != window.allows(previousLocal->minute) ||
+                          (window.enabled && previousLocal->day != local_->day))) {
+        clearAutomatic();
+    }
+    if (!autoAllowed) {
+        cancelUnstartedAutomatic();
+    }
     const bool followsPrevious = !offsetChanged && previousClock_ && follows(*previousClock_, sample);
     const bool continuous = followsPrevious && continuityAnchor_ && follows(*continuityAnchor_, sample);
     if (!continuous) {
@@ -105,6 +114,7 @@ void Irrigation::observeTime(const SystemConfig& config, ClockSample sample) {
             }
             // 旧账已经可靠结算，原时区和现时区均进入后续自然日。
             const bool skipMinute = date.schedulesSuspended || !enteredNextMinute;
+            finishGroup(IrrigationResult::Failed);
             date = QuotaDate{local_->day, offsetMinutes_, {}, false};
             state_.usage.clear();
             dirty_ = true;
@@ -149,7 +159,8 @@ void Irrigation::observeSchedule(const SystemConfig& config, bool continuous, bo
     if (!enteredNextMinute) {
         return;
     }
-    const bool canQueue = !state_.autoPaused && state_.fault == Fault::None && !saveFailed_;
+    const bool canQueue = !state_.autoPaused && state_.fault == Fault::None && !saveFailed_ &&
+                          config.autoIrrigationWindow.allows(minute);
     bool consumed = false;
     for (const auto& zone : config.zones) {
         if (zone.rule.mode != AutoMode::Scheduled) {
@@ -168,7 +179,9 @@ void Irrigation::observeSchedule(const SystemConfig& config, bool continuous, bo
     }
     if (consumed) {
         date.consumedThroughMinute = minute;
-        scheduleWindow_ = Trigger{local_->day, minute, 0};
+        if (canQueue) {
+            scheduleWindow_ = Trigger{local_->day, minute, 0};
+        }
         dirty_ = true;
     }
 }
@@ -186,7 +199,8 @@ bool Irrigation::cooling(const IrrigationZone& zone, LogicalChannel channel, Mon
 
 void Irrigation::observeSoil(const SystemConfig& config, EntityId zoneId, const SensorReading* reading) {
     const auto* zone = findById(config.zones, zoneId);
-    if (!dateReady() || config.utcOffsetMinutes != offsetMinutes_ || state_.autoPaused || saveFailed_ ||
+    if (!dateReady() || config.utcOffsetMinutes != offsetMinutes_ ||
+        !config.autoIrrigationWindow.allows(local_->minute) || state_.autoPaused || saveFailed_ ||
         state_.fault != Fault::None || !zone || zone->rule.mode != AutoMode::Smart ||
         checkZoneReadiness(config, channels_, zoneId, IrrigationSource::Smart) != ZoneReadiness::Ready) {
         const auto found = std::find_if(soil_.begin(), soil_.end(), [zoneId](const auto& entry) {
@@ -237,7 +251,9 @@ void Irrigation::observeSoil(const SystemConfig& config, EntityId zoneId, const 
         return;
     }
     cancelCandidate(zoneId, IrrigationSource::Smart);
-    if (entry->lastSample && stamp - *entry->lastSample > config.sampleIntervalMs) {
+    const MonotonicMs interval = config.sampleIntervalMs;
+    const MonotonicMs jitter = std::min<MonotonicMs>(interval / 10, 30'000);
+    if (entry->lastSample && stamp - *entry->lastSample > interval + jitter) {
         entry->consecutive = 0;
     }
     entry->lastSample = stamp;
@@ -257,6 +273,7 @@ void Irrigation::observeSoil(const SystemConfig& config, EntityId zoneId, const 
 
 void Irrigation::resetAutomatic() {
     clearAutomatic();
+    cancelUnstartedAutomatic();
 }
 
 void Irrigation::clearAutomatic() {
@@ -264,6 +281,13 @@ void Irrigation::clearAutomatic() {
     automaticAfterMs_ = now_;
     soil_.clear();
     candidates_.clear();
+}
+
+void Irrigation::cancelUnstartedAutomatic() {
+    if ((phase_ == Phase::Preparing || phase_ == Phase::AwaitingStart) &&
+        state_.pending->request.source != IrrigationSource::Manual) {
+        requestStop(StopReason::Interrupted);
+    }
 }
 
 void Irrigation::cancelCandidate(EntityId zoneId, IrrigationSource source) {

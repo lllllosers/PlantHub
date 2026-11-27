@@ -15,6 +15,7 @@ enum class ConfigError {
     InvalidSystemInterval,
     InvalidRetention,
     InvalidUtcOffset,
+    InvalidAutoIrrigationWindow,
     InvalidId,
     DuplicateId,
     EmptyName,

@@ -16,6 +16,8 @@ SystemConfig configuration() {
     SystemConfig config;
     config.utcOffsetMinutes = 0;
     config.sampleIntervalMs = 1'000;
+    // 既有回归以午夜附近为时间基准，时段规则使用独立用例验证。
+    config.autoIrrigationWindow.enabled = false;
     config.pumps = {{21, "Pump 1", 0, 60'000, 1, 5'000}, {22, "Pump 2", 1, 60'000, 1, 5'000}};
     config.soilSensors = {{11, "Soil 1", 0, SoilCalibration{0, 100}}, {12, "Soil 2", 1, SoilCalibration{0, 100}}};
     config.plants = {{1, "Plant 1", true, 11, 31}, {2, "Plant 2", true, 12, 32}};
@@ -54,11 +56,16 @@ void clock(Irrigation& engine, const SystemConfig& config, MonotonicMs ms, UtcSe
     engine.observeTime(config, {ms, utc});
 }
 
+void recordSoil(Irrigation& engine, const SystemConfig& config, MonotonicMs stamp, float moisture = 20,
+                ReadingStatus status = ReadingStatus::Valid, EntityId sensor = 11) {
+    const SensorReading reading{stamp, {}, SoilReading{sensor, 20, moisture, status}};
+    engine.observeSoil(config, 31, &reading);
+}
+
 void soil(Irrigation& engine, const SystemConfig& config, MonotonicMs now, MonotonicMs stamp, float moisture = 20,
           ReadingStatus status = ReadingStatus::Valid, EntityId sensor = 11) {
     clock(engine, config, now, day + static_cast<UtcSeconds>(now / 1'000));
-    const SensorReading reading{stamp, {}, SoilReading{sensor, 20, moisture, status}};
-    engine.observeSoil(config, 31, &reading);
+    recordSoil(engine, config, stamp, moisture, status, sensor);
 }
 
 StartPermit start(Irrigation& engine, const SystemConfig& config) {
@@ -235,7 +242,8 @@ void test_clock_deadlines_and_snapshot_survive_calibration_and_wall_changes() {
     TEST_ASSERT_TRUE(engine.pendingStop()->reason == StopReason::Planned);
     clock(engine, config, 6'000, day);
     TEST_ASSERT_TRUE(engine.pendingStop()->reason == StopReason::MaximumDuration);
-    TEST_ASSERT_TRUE(engine.confirmStopped({permit.plan.executionId, 6'000, StopEvidence::Measured, 40}));
+    // 事件迟到，实际启停时刻仍与确认时长一致。
+    TEST_ASSERT_TRUE(engine.confirmStopped({permit.plan.executionId, 1'040, StopEvidence::Measured, 40}));
     const auto state = save(engine);
     const auto record = engine.takeRecord();
     TEST_ASSERT_TRUE(record->result == IrrigationResult::Failed);
@@ -287,6 +295,54 @@ void test_settlement_saturates_conversion_and_addition() {
     }
 }
 
+void test_contradictory_stop_evidence_cannot_release_reservation_or_hide_excess() {
+    struct Case {
+        bool started;
+        StopEvidence evidence;
+        std::optional<DurationMs> reported;
+        MonotonicMs elapsed;
+        VolumeMl charged;
+        Fault fault;
+    };
+    const Case cases[] = {
+        {false, StopEvidence::NeverStarted, 5, 10, 30, Fault::UnknownDelivery},
+        {true, StopEvidence::NeverStarted, 0, 10, 30, Fault::UnknownDelivery},
+        {false, StopEvidence::Measured, 5, 4, 30, Fault::UnknownDelivery},
+        {true, StopEvidence::Measured, 5, 4, 30, Fault::UnknownDelivery},
+        {true, StopEvidence::Measured, 2, 10, 30, Fault::UnknownDelivery},
+        {true, StopEvidence::Measured, 2, 45, 45, Fault::ExcessDelivery},
+        {true, StopEvidence::Measured, {}, 45, 45, Fault::ExcessDelivery},
+        {true, StopEvidence::Unknown, 50, 60, 30, Fault::UnknownDelivery},
+        {true, StopEvidence::Measured, 2, MonotonicMs{1} + std::numeric_limits<DurationMs>::max(),
+         std::numeric_limits<VolumeMl>::max(), Fault::AccountingOverflow},
+    };
+    const auto config = configuration();
+    for (const auto& item : cases) {
+        Irrigation engine(channels, Recovery::FirstInitialization, 0);
+        clock(engine, config, 100, day);
+        expect(Rejection::None, engine.accept(config, manual(1)));
+        save(engine);
+        const auto permit = engine.issueStart(config);
+        TEST_ASSERT_TRUE(permit.has_value());
+        const auto id = permit->plan.executionId;
+        if (item.started) {
+            TEST_ASSERT_TRUE(engine.confirmStarted(id, 100));
+        }
+        engine.stopAll();
+        const PumpStopped event{id, 100 + item.elapsed, item.evidence, item.reported};
+        TEST_ASSERT_TRUE(engine.confirmStopped(event));
+        TEST_ASSERT_FALSE(engine.confirmStopped(event));
+        expect(Rejection::FaultLocked, engine.accept(config, manual(2)));
+        const auto durable = save(engine);
+        TEST_ASSERT_EQUAL_UINT32(item.charged, durable.usage[0].usedMl);
+        TEST_ASSERT_TRUE(durable.fault == item.fault);
+        const auto record = engine.takeRecord();
+        TEST_ASSERT_TRUE(record->result == IrrigationResult::Unknown);
+        TEST_ASSERT_FALSE(record->actualDurationMs.has_value());
+        TEST_ASSERT_FALSE(record->estimatedVolumeMl.has_value());
+    }
+}
+
 void test_smart_uses_latest_valid_contiguous_sample_only_once() {
     auto config = configuration();
     config.zones[1].rule.mode = AutoMode::Smart;
@@ -333,6 +389,175 @@ void test_bad_sample_values_and_gaps_reset_smart_streak() {
         soil(engine, config, 7'500, 7'500);
         expect(Rejection::None, engine.acceptAutomatic(config));
     }
+}
+
+void test_smart_continuity_tolerates_bounded_jitter_and_detects_a_missed_cycle() {
+    struct Case {
+        DurationMs interval;
+        MonotonicMs firstGap;
+        MonotonicMs secondGap;
+        bool triggered;
+    };
+    const Case cases[] = {{1'000, 1'000, 1'000, true}, {1'000, 920, 1'090, true},
+                          {1'000, 1'100, 1'100, true}, {1'000, 1'101, 1'000, false},
+                          {1'000, 1'900, 1'000, false}, {600'000, 630'000, 600'000, true},
+                          {600'000, 630'001, 600'000, false}};
+    for (const auto& item : cases) {
+        auto config = configuration();
+        config.sampleIntervalMs = item.interval;
+        config.zones[1].rule.mode = AutoMode::Smart;
+        Irrigation engine(channels, Recovery::FirstInitialization, 0);
+        clock(engine, config, 0, day);
+        const auto second = 1'000 + item.firstGap;
+        const auto third = second + item.secondGap;
+        soil(engine, config, 1'000, 1'000);
+        soil(engine, config, second, second);
+        soil(engine, config, third, third);
+        expect(item.triggered ? Rejection::None : Rejection::StaleTrigger, engine.acceptAutomatic(config));
+    }
+}
+
+void test_schedules_open_at_start_and_consume_outside_slots_without_backfill() {
+    auto config = configuration();
+    config.autoIrrigationWindow.enabled = true;
+    auto& rule = config.zones[1].rule;
+    rule.mode = AutoMode::Scheduled;
+    rule.schedule = {{299, 25}, {300, 30}, {1380, 35}};
+    TEST_ASSERT_TRUE(validateConfig(config, channels).error == ConfigError::None);
+    Irrigation engine(channels, Recovery::FirstInitialization, 0);
+    clock(engine, config, 0, day + 299 * 60 - 1);
+    clock(engine, config, 1'000, day + 299 * 60);
+    TEST_ASSERT_TRUE(engine.state().date->consumedThroughMinute == 299);
+    expect(Rejection::StaleTrigger, engine.acceptAutomatic(config));
+    clock(engine, config, 60'000, day + 300 * 60 - 1);
+    clock(engine, config, 61'000, day + 300 * 60);
+    expect(Rejection::None, engine.acceptAutomatic(config));
+    TEST_ASSERT_EQUAL_UINT32(30, engine.activePlan()->request.dose.volumeMl);
+    complete(engine, start(engine, config));
+    clock(engine, config, 100'000, day + 1380 * 60 - 1);
+    clock(engine, config, 101'000, day + 1380 * 60);
+    TEST_ASSERT_TRUE(engine.state().date->consumedThroughMinute == 1380);
+    expect(Rejection::StaleTrigger, engine.acceptAutomatic(config));
+    const IrrigationRequest outside{0, IrrigationSource::Scheduled, {31, 35}, Trigger{1, 1380, 0}};
+    expect(Rejection::OutsideAutoWindow, engine.accept(config, outside));
+    expect(Rejection::None, engine.accept(config, manual(1)));
+    complete(engine, start(engine, config));
+    expect(Rejection::None, engine.acceptGroup(config, 2, 41, {10, 10}));
+}
+
+void test_automatic_duration_must_fit_and_is_rechecked_after_saving() {
+    for (const VolumeMl dose : {58, 59}) {
+        auto config = configuration();
+        config.autoIrrigationWindow.enabled = true;
+        config.pumps[0].flowMlPerMin = 60;
+        config.pumps[0].maxDurationMs = 60'000;
+        auto& rule = config.zones[1].rule;
+        rule.mode = AutoMode::Scheduled;
+        rule.schedule = {{1379, dose}};
+        Irrigation engine(channels, Recovery::FirstInitialization, 0);
+        clock(engine, config, 0, day + 1379 * 60 - 1);
+        clock(engine, config, 1'000, day + 1379 * 60);
+        if (dose == 59) {
+            expect(Rejection::OutsideAutoWindow, engine.acceptAutomatic(config));
+            TEST_ASSERT_FALSE(engine.activePlan().has_value());
+        } else {
+            expect(Rejection::None, engine.acceptAutomatic(config));
+            const auto reservation = engine.beginSave();
+            TEST_ASSERT_TRUE(reservation.has_value());
+            clock(engine, config, 3'000, day + 1379 * 60 + 2);
+            TEST_ASSERT_TRUE(engine.finishSave(reservation->id, true));
+            TEST_ASSERT_FALSE(engine.issueStart(config).has_value());
+            TEST_ASSERT_TRUE(engine.phase() == Phase::Settling);
+            const auto durable = save(engine);
+            TEST_ASSERT_EQUAL_UINT32(0, durable.usage[0].usedMl);
+            TEST_ASSERT_TRUE(engine.takeRecord()->actualDurationMs == 0);
+        }
+    }
+}
+
+void test_smart_window_restarts_sampling_and_config_reset_drops_old_candidate() {
+    auto config = configuration();
+    config.autoIrrigationWindow.enabled = true;
+    config.zones[1].rule.mode = AutoMode::Smart;
+    Irrigation engine(channels, Recovery::FirstInitialization, 0);
+    const auto opening = day + 5 * 3600;
+    const auto sample = [&](MonotonicMs ms) {
+        clock(engine, config, ms, opening - 4 + static_cast<UtcSeconds>(ms / 1'000));
+        recordSoil(engine, config, ms);
+    };
+    clock(engine, config, 0, opening - 4);
+    sample(1'000);
+    sample(2'000);
+    sample(3'000);
+    expect(Rejection::StaleTrigger, engine.acceptAutomatic(config));
+    clock(engine, config, 4'000, opening);
+    recordSoil(engine, config, 3'000);
+    sample(5'000);
+    sample(6'000);
+    expect(Rejection::StaleTrigger, engine.acceptAutomatic(config));
+    sample(7'000);
+    config.autoIrrigationWindow.endMinute = 1379;
+    engine.resetAutomatic();
+    expect(Rejection::StaleTrigger, engine.acceptAutomatic(config));
+    recordSoil(engine, config, 7'000);
+    sample(8'000);
+    sample(9'000);
+    expect(Rejection::StaleTrigger, engine.acceptAutomatic(config));
+    sample(10'000);
+    expect(Rejection::None, engine.acceptAutomatic(config));
+    TEST_ASSERT_TRUE(complete(engine, start(engine, config)).source == IrrigationSource::Smart);
+}
+
+void test_window_close_cancels_unstarted_auto_and_preserves_running_stop_deadline() {
+    for (const auto phase : {Phase::Preparing, Phase::AwaitingStart, Phase::Running}) {
+        auto config = configuration();
+        config.autoIrrigationWindow = {true, 0, 1};
+        config.zones[1].rule.mode = AutoMode::Smart;
+        Irrigation engine(channels, Recovery::FirstInitialization, 0);
+        clock(engine, config, 0, day + 55);
+        for (MonotonicMs second = 1; second <= 3; ++second) {
+            clock(engine, config, second * 1'000, day + 55 + static_cast<UtcSeconds>(second));
+            recordSoil(engine, config, second * 1'000);
+        }
+        expect(Rejection::None, engine.acceptAutomatic(config));
+        std::optional<StartPermit> permit;
+        if (phase != Phase::Preparing) {
+            save(engine);
+            permit = engine.issueStart(config);
+            TEST_ASSERT_TRUE(permit.has_value());
+            if (phase == Phase::Running) {
+                TEST_ASSERT_TRUE(engine.confirmStarted(permit->plan.executionId, 3'000));
+            }
+        }
+        clock(engine, config, 3'010, day + 60);
+        TEST_ASSERT_FALSE(engine.issueStart(config).has_value());
+        if (phase == Phase::Running) {
+            TEST_ASSERT_TRUE(engine.phase() == Phase::Running);
+            clock(engine, config, permit->plannedStopMs, day + 60);
+            TEST_ASSERT_TRUE(engine.pendingStop()->reason == StopReason::Planned);
+            complete(engine, *permit);
+        } else if (phase == Phase::AwaitingStart) {
+            TEST_ASSERT_TRUE(engine.pendingStop()->reason == StopReason::Interrupted);
+            TEST_ASSERT_TRUE(engine.confirmStopped({permit->plan.executionId, 3'010, StopEvidence::NeverStarted, {}}));
+            save(engine);
+        } else {
+            TEST_ASSERT_TRUE(engine.phase() == Phase::Settling);
+            save(engine);
+        }
+        expect(Rejection::StaleTrigger, engine.acceptAutomatic(config));
+    }
+}
+
+void test_disabled_auto_window_still_enforces_midnight() {
+    auto config = configuration();
+    config.zones[1].rule.mode = AutoMode::Smart;
+    Irrigation engine(channels, Recovery::FirstInitialization, 0);
+    clock(engine, config, 0, day * 2 - 4);
+    for (MonotonicMs second = 1; second <= 3; ++second) {
+        clock(engine, config, second * 1'000, day * 2 - 4 + static_cast<UtcSeconds>(second));
+        recordSoil(engine, config, second * 1'000);
+    }
+    expect(Rejection::CrossesMidnight, engine.acceptAutomatic(config));
 }
 
 void test_automatic_modes_share_manual_quota_and_respect_pause() {
@@ -491,6 +716,7 @@ void test_date_rollover_waits_for_stable_time_and_reliable_settlement() {
     clock(engine, config, 61'030, day * 3 + 60);
     TEST_ASSERT_EQUAL_INT64(3, engine.state().date->day);
     TEST_ASSERT_TRUE(engine.state().usage.empty());
+    TEST_ASSERT_TRUE(engine.remaining(31, 200) == 200);
     clock(engine, config, 61'031, day * 2);
     expect(Rejection::InvalidTime, engine.accept(config, manual(2)));
     TEST_ASSERT_EQUAL_INT64(3, engine.state().date->day);
@@ -557,6 +783,41 @@ void test_group_prechecks_all_and_reserves_members_in_explicit_order() {
     complete(engine, start(engine, config));
     TEST_ASSERT_FALSE(engine.groupActive());
     TEST_ASSERT_TRUE(engine.acceptGroup(config, 1, 42, {10, 30}).previousResult == IrrigationResult::Completed);
+}
+
+void test_group_rejects_total_at_midnight_without_creating_a_reservation() {
+    auto config = configuration();
+    for (auto& zone : config.zones) {
+        zone.rule.singleLimitMl = 1'000;
+        zone.rule.dailyLimitMl = 2'000;
+    }
+    Irrigation engine(channels, Recovery::FirstInitialization, 0);
+    clock(engine, config, 0, day * 2 - 2);
+    expect(Rejection::CrossesMidnight, engine.acceptGroup(config, 1, 41, {600, 400}));
+    TEST_ASSERT_TRUE(engine.state().usage.empty());
+    TEST_ASSERT_TRUE(engine.state().manualReceipts.empty());
+    TEST_ASSERT_FALSE(engine.activePlan().has_value());
+    expect(Rejection::None, engine.acceptGroup(config, 1, 41, {600, 399}));
+}
+
+void test_new_quota_day_cancels_group_after_the_completed_member_is_settled() {
+    const auto config = configuration();
+    Irrigation engine(channels, Recovery::FirstInitialization, 0);
+    clock(engine, config, 0, day);
+    expect(Rejection::None, engine.acceptGroup(config, 1, 41, {10, 30}));
+    const auto first = complete(engine, start(engine, config));
+    TEST_ASSERT_TRUE(first.result == IrrigationResult::Completed);
+    TEST_ASSERT_TRUE(engine.remaining(31, 200) == 190);
+    clock(engine, config, 1'000, day * 2);
+    TEST_ASSERT_TRUE(engine.groupActive());
+    clock(engine, config, 61'000, day * 2 + 60);
+    TEST_ASSERT_EQUAL_INT64(2, engine.state().date->day);
+    TEST_ASSERT_FALSE(engine.groupActive());
+    TEST_ASSERT_FALSE(engine.activePlan().has_value());
+    TEST_ASSERT_TRUE(engine.acceptGroup(config, 1, 41, {10, 30}).previousResult == IrrigationResult::Failed);
+    TEST_ASSERT_TRUE(engine.remaining(31, 200) == 200);
+    TEST_ASSERT_TRUE(engine.remaining(32, 200) == 200);
+    save(engine);
 }
 
 void test_group_recheck_stop_and_reboot_cancel_remaining_members() {
@@ -663,8 +924,15 @@ int main() {
     RUN_TEST(test_clock_deadlines_and_snapshot_survive_calibration_and_wall_changes);
     RUN_TEST(test_monotonic_regression_protects_pending_start_and_overflow_is_rejected);
     RUN_TEST(test_settlement_saturates_conversion_and_addition);
+    RUN_TEST(test_contradictory_stop_evidence_cannot_release_reservation_or_hide_excess);
     RUN_TEST(test_smart_uses_latest_valid_contiguous_sample_only_once);
     RUN_TEST(test_bad_sample_values_and_gaps_reset_smart_streak);
+    RUN_TEST(test_smart_continuity_tolerates_bounded_jitter_and_detects_a_missed_cycle);
+    RUN_TEST(test_schedules_open_at_start_and_consume_outside_slots_without_backfill);
+    RUN_TEST(test_automatic_duration_must_fit_and_is_rechecked_after_saving);
+    RUN_TEST(test_smart_window_restarts_sampling_and_config_reset_drops_old_candidate);
+    RUN_TEST(test_window_close_cancels_unstarted_auto_and_preserves_running_stop_deadline);
+    RUN_TEST(test_disabled_auto_window_still_enforces_midnight);
     RUN_TEST(test_automatic_modes_share_manual_quota_and_respect_pause);
     RUN_TEST(test_cooling_from_manual_and_scheduled_survives_mode_change_and_reboot);
     RUN_TEST(test_scheduled_conflicts_use_zone_id_and_expire_without_catch_up);
@@ -673,6 +941,8 @@ int main() {
     RUN_TEST(test_timezone_change_cannot_reset_daily_quota_or_repeat_schedule);
     RUN_TEST(test_local_date_handles_negative_offsets_and_both_utc_limits);
     RUN_TEST(test_group_prechecks_all_and_reserves_members_in_explicit_order);
+    RUN_TEST(test_group_rejects_total_at_midnight_without_creating_a_reservation);
+    RUN_TEST(test_new_quota_day_cancels_group_after_the_completed_member_is_settled);
     RUN_TEST(test_group_recheck_stop_and_reboot_cancel_remaining_members);
     RUN_TEST(test_recovery_charges_unknown_once_preserves_pause_and_rejects_corruption);
     RUN_TEST(test_manual_retention_requires_explicit_expiration);

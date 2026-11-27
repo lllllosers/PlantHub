@@ -41,14 +41,17 @@ void test_model_defaults_and_derived_reading_validity() {
     SystemConfig config;
     assertConfig(config, ConfigError::None);
     TEST_ASSERT_EQUAL_UINT32(SystemConfig::currentSchemaVersion, config.schemaVersion);
-    TEST_ASSERT_EQUAL_UINT32(60'000, config.sampleIntervalMs);
+    TEST_ASSERT_EQUAL_UINT32(300'000, config.sampleIntervalMs);
     TEST_ASSERT_EQUAL_UINT32(5'000, config.dashboardRefreshMs);
     TEST_ASSERT_EQUAL_UINT32(300'000, config.historySampleIntervalMs);
     TEST_ASSERT_EQUAL_UINT32(14, config.monitoringRetentionDays);
     TEST_ASSERT_EQUAL_UINT32(90, config.irrigationRetentionDays);
     TEST_ASSERT_EQUAL_INT(480, config.utcOffsetMinutes);
     TEST_ASSERT_EQUAL_UINT(1, SystemConfig::maxConcurrentPumps);
-    TEST_ASSERT_EQUAL_UINT64(120'000, config.readingValidityMs());
+    TEST_ASSERT_EQUAL_UINT64(600'000, config.readingValidityMs());
+    TEST_ASSERT_TRUE(config.autoIrrigationWindow.enabled);
+    TEST_ASSERT_EQUAL_UINT(300, config.autoIrrigationWindow.startMinute);
+    TEST_ASSERT_EQUAL_UINT(1'380, config.autoIrrigationWindow.endMinute);
     config.sampleIntervalMs = 21'000;
     TEST_ASSERT_EQUAL_UINT64(42'000, config.readingValidityMs());
     config.sampleIntervalMs = std::numeric_limits<DurationMs>::max();
@@ -57,6 +60,24 @@ void test_model_defaults_and_derived_reading_validity() {
     TEST_ASSERT_TRUE(rule.mode == AutoMode::Off);
     TEST_ASSERT_EQUAL_UINT32(3, rule.consecutiveLowReadings);
     TEST_ASSERT_FALSE(rule.smartDoseMl.has_value());
+}
+
+void test_global_auto_window_bounds_are_validated_even_when_disabled() {
+    auto config = twoPlantConfig();
+    const AutoIrrigationWindow invalidWindows[] = {
+        {true, 0, 0}, {true, 1439, 1441}, {true, 1440, 1440},
+        {true, 300, 300}, {true, 1380, 300}, {false, 1380, 300},
+    };
+    for (const auto& window : invalidWindows) {
+        config.autoIrrigationWindow = window;
+        assertConfig(config, ConfigError::InvalidAutoIrrigationWindow);
+    }
+    config.autoIrrigationWindow = {true, 0, 1};
+    assertConfig(config, ConfigError::None);
+    config.autoIrrigationWindow = {true, 1439, 1440};
+    assertConfig(config, ConfigError::None);
+    config.autoIrrigationWindow = {false, 0, 1440};
+    assertConfig(config, ConfigError::None);
 }
 
 void test_two_plant_configuration_allows_shared_zones_and_ordered_groups() {
@@ -287,6 +308,7 @@ void tearDown() {}
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_model_defaults_and_derived_reading_validity);
+    RUN_TEST(test_global_auto_window_bounds_are_validated_even_when_disabled);
     RUN_TEST(test_two_plant_configuration_allows_shared_zones_and_ordered_groups);
     RUN_TEST(test_channel_capabilities_can_be_sparse_and_support_more_than_two_plants);
     RUN_TEST(test_already_configured_relationships_and_legal_preparation_states);

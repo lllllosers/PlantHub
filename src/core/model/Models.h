@@ -128,17 +128,28 @@ struct IrrigationRecord {
     StopReason stopReason = StopReason::None;
 };
 
+struct AutoIrrigationWindow {
+    bool enabled = true;
+    std::uint16_t startMinute = 5 * 60;
+    std::uint16_t endMinute = 23 * 60;
+
+    bool allows(std::uint16_t minute) const {
+        return !enabled || (minute >= startMinute && minute < endMinute);
+    }
+};
+
 struct SystemConfig {
     static constexpr std::uint32_t currentSchemaVersion = 1;
     static constexpr std::uint8_t maxConcurrentPumps = 1;
 
     std::uint32_t schemaVersion = currentSchemaVersion;
-    DurationMs sampleIntervalMs = 60'000;
+    DurationMs sampleIntervalMs = 300'000;
     DurationMs dashboardRefreshMs = 5'000;
     DurationMs historySampleIntervalMs = 300'000;
     std::uint32_t monitoringRetentionDays = 14;
     std::uint32_t irrigationRetentionDays = 90;
     std::int16_t utcOffsetMinutes = 8 * 60;
+    AutoIrrigationWindow autoIrrigationWindow;
 
     std::vector<Plant> plants;
     std::vector<SoilSensor> soilSensors;

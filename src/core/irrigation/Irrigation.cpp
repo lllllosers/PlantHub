@@ -7,6 +7,11 @@
 namespace planthub::core {
 namespace {
 
+bool finishesBefore(MonotonicMs plannedMs, std::uint32_t secondsRemaining) {
+    // UTC 只有秒精度，扣掉当前秒中无法确认的部分。
+    return secondsRemaining > 0 && plannedMs < (secondsRemaining - 1) * 1'000u;
+}
+
 template <typename Entries>
 auto findReceipt(Entries& entries, RequestId id) {
     return std::find_if(entries.begin(), entries.end(), [id](const auto& entry) { return entry.requestId == id; });
@@ -85,8 +90,15 @@ Decision Irrigation::check(const SystemConfig& config, const IrrigationRequest& 
     const auto& zone = *findById(config.zones, request.dose.zoneId);
     const auto& rule = zone.rule;
     const auto& pump = *findById(config.pumps, zone.pumpId);
-    if (request.source != IrrigationSource::Manual && state_.autoPaused) {
-        return {Rejection::AutoPaused};
+    const bool automatic = request.source != IrrigationSource::Manual;
+    const auto& window = config.autoIrrigationWindow;
+    if (automatic) {
+        if (state_.autoPaused) {
+            return {Rejection::AutoPaused};
+        }
+        if (!window.allows(local_->minute)) {
+            return {Rejection::OutsideAutoWindow};
+        }
     }
     if (request.source == IrrigationSource::Scheduled) {
         if (rule.mode != AutoMode::Scheduled) {
@@ -143,9 +155,12 @@ Decision Irrigation::check(const SystemConfig& config, const IrrigationRequest& 
     if (duration.error != DurationError::None) {
         return {Rejection::Duration, ZoneReadiness::Ready, duration.error};
     }
-    // UTC 只有秒精度。扣掉当前秒的剩余部分，保守拒绝触及午夜的计划。
-    if (*duration.durationMs >= (local_->secondsRemaining - 1) * 1'000u) {
+    if (!finishesBefore(*duration.durationMs, local_->secondsRemaining)) {
         return {Rejection::CrossesMidnight};
+    }
+    if (automatic && window.enabled &&
+        !finishesBefore(*duration.durationMs, local_->secondsRemaining - (24 * 60 - window.endMinute) * 60u)) {
+        return {Rejection::OutsideAutoWindow};
     }
     if (*pump.maxDurationMs > std::numeric_limits<MonotonicMs>::max() - now_) {
         return {Rejection::ClockRange};
@@ -250,7 +265,10 @@ Decision Irrigation::acceptGroup(const SystemConfig& config, RequestId id, Entit
         return {Rejection::Capacity};
     }
 
+    static_assert(CriticalState::maxTrackedZones <=
+                  std::numeric_limits<MonotonicMs>::max() / std::numeric_limits<DurationMs>::max());
     IrrigationPlan first;
+    MonotonicMs groupDurationMs = 0;
     std::size_t additionalZones = 0;
     std::size_t additionalWateringChannels = 0;
     for (const auto& dose : doses) {
@@ -261,6 +279,7 @@ Decision Irrigation::acceptGroup(const SystemConfig& config, RequestId id, Entit
         if (first.request.dose.zoneId == 0) {
             first = plan;
         }
+        groupDurationMs += plan.plannedMs;
         if (std::none_of(state_.usage.begin(), state_.usage.end(),
                          [&dose](const auto& entry) { return entry.zoneId == dose.zoneId; })) {
             ++additionalZones;
@@ -270,6 +289,9 @@ Decision Irrigation::acceptGroup(const SystemConfig& config, RequestId id, Entit
             ++additionalWateringChannels;
         }
     }
+    if (!finishesBefore(groupDurationMs, local_->secondsRemaining)) {
+        return {Rejection::CrossesMidnight};
+    }
     if (additionalZones + state_.usage.size() > CriticalState::maxTrackedZones ||
         additionalWateringChannels + state_.recentWatering.size() > CriticalState::maxTrackedZones) {
         return {Rejection::Capacity};
@@ -277,7 +299,7 @@ Decision Irrigation::acceptGroup(const SystemConfig& config, RequestId id, Entit
     const auto reserved = reserve(first);
     if (reserved) {
         state_.manualReceipts.push_back({id, groupId, std::move(doses)});
-        group_ = GroupRun{id};
+        group_ = GroupRun{id, 0, first.quotaDay};
     }
     return reserved;
 }
@@ -288,6 +310,10 @@ Decision Irrigation::advanceGroup(const SystemConfig& config) {
     }
     if (phase_ != Phase::Idle || dirty_ || inFlight_) {
         return {Rejection::Busy};
+    }
+    if (state_.date->day != group_->quotaDay) {
+        finishGroup(IrrigationResult::Failed);
+        return {Rejection::CrossesMidnight};
     }
     const auto& receipt = *findReceipt(state_.manualReceipts, group_->id);
     IrrigationPlan next;
@@ -431,33 +457,41 @@ bool Irrigation::confirmStopped(PumpStopped event) {
         event.executionId != state_.pending->executionId) {
         return false;
     }
-    const auto earliestStop = execution_->startedMs.value_or(execution_->permit->issuedAtMs);
+    const auto& permit = *execution_->permit;
+    const auto earliestStop = execution_->startedMs.value_or(permit.issuedAtMs);
     if (event.stoppedAtMs < earliestStop) {
         return false;
     }
-    if (event.evidence == StopEvidence::NeverStarted && execution_->startedMs) {
+    if (event.evidence == StopEvidence::NeverStarted &&
+        (execution_->startedMs || event.durationMs.value_or(0) != 0)) {
+        requestStop(StopReason::DeviceFault);
         event.evidence = StopEvidence::Unknown;
     }
-    if (event.evidence == StopEvidence::Measured && (!event.durationMs || *event.durationMs == 0)) {
-        event.evidence = StopEvidence::Unknown;
-    }
+    MonotonicMs confirmedElapsedMs = 0;
     if (event.evidence == StopEvidence::Measured) {
-        const auto& permit = *execution_->permit;
-        if (*event.durationMs > permit.plan.maximumMs || event.stoppedAtMs > permit.hardStopMs) {
-            requestStop(StopReason::MaximumDuration);
-        } else if (*event.durationMs > event.stoppedAtMs - earliestStop) {
+        const auto elapsedMs = event.stoppedAtMs - earliestStop;
+        if (event.durationMs.value_or(0) == 0 || *event.durationMs > elapsedMs ||
+            (execution_->startedMs && *event.durationMs != elapsedMs)) {
             requestStop(StopReason::ClockFault);
+            event.evidence = StopEvidence::Unknown;
+            // 已确认的启停时刻仍可证明超量。只有许可时刻时，时间差只能作为上界。
+            if (execution_->startedMs) {
+                confirmedElapsedMs = elapsedMs;
+            }
+        } else if (*event.durationMs > permit.plan.maximumMs || event.stoppedAtMs > permit.hardStopMs) {
+            requestStop(StopReason::MaximumDuration);
         } else if (execution_->stopReason == StopReason::Planned && *event.durationMs < permit.plan.plannedMs) {
             requestStop(StopReason::DeviceFault);
         } else if (execution_->stopReason == StopReason::None) {
             requestStop(*event.durationMs >= permit.plan.plannedMs ? StopReason::Planned : StopReason::DeviceFault);
         }
     }
-    settle(event.evidence, event.durationMs, std::max(now_, event.stoppedAtMs));
+    settle(event.evidence, event.durationMs, std::max(now_, event.stoppedAtMs), confirmedElapsedMs);
     return true;
 }
 
-void Irrigation::settle(StopEvidence evidence, std::optional<DurationMs> duration, MonotonicMs endMs) {
+void Irrigation::settle(StopEvidence evidence, std::optional<DurationMs> duration, MonotonicMs endMs,
+                        MonotonicMs confirmedElapsedMs) {
     const auto plan = *state_.pending;
     const auto& request = plan.request;
     const auto reason = execution_->stopReason;
@@ -474,26 +508,37 @@ void Irrigation::settle(StopEvidence evidence, std::optional<DurationMs> duratio
         volume = 0.0;
         charged = 0;
         result = reason == StopReason::Manual ? IrrigationResult::Stopped : IrrigationResult::Failed;
-    } else if (evidence == StopEvidence::Measured) {
-        const auto delivery = *estimateDelivery(plan.flowMlPerMin, *duration);
-        volume = delivery.volumeMl;
-        if (!delivery.chargeMl) {
+    } else {
+        const bool measured = evidence == StopEvidence::Measured;
+        if (measured) {
+            confirmedElapsedMs = *duration;
+        } else {
+            duration.reset();
+            result = IrrigationResult::Unknown;
+            fault = Fault::UnknownDelivery;
+        }
+        if (confirmedElapsedMs > std::numeric_limits<DurationMs>::max()) {
             charged = std::numeric_limits<VolumeMl>::max();
             fault = Fault::AccountingOverflow;
-        } else {
-            charged = *delivery.chargeMl;
-            if (charged > request.dose.volumeMl) {
-                fault = Fault::ExcessDelivery;
+        } else if (confirmedElapsedMs > 0) {
+            const auto delivery = *estimateDelivery(plan.flowMlPerMin, static_cast<DurationMs>(confirmedElapsedMs));
+            if (measured) {
+                volume = delivery.volumeMl;
+            }
+            if (!delivery.chargeMl) {
+                charged = std::numeric_limits<VolumeMl>::max();
+                fault = Fault::AccountingOverflow;
+            } else if (measured || *delivery.chargeMl > charged) {
+                charged = *delivery.chargeMl;
+                if (charged > request.dose.volumeMl) {
+                    fault = Fault::ExcessDelivery;
+                }
             }
         }
         if (fault == Fault::None) {
             result = reason == StopReason::Planned ? IrrigationResult::Completed :
                      reason == StopReason::Manual ? IrrigationResult::Stopped : IrrigationResult::Failed;
         }
-    } else {
-        duration.reset();
-        result = IrrigationResult::Unknown;
-        fault = Fault::UnknownDelivery;
     }
 
     auto& usage = *std::find_if(state_.usage.begin(), state_.usage.end(),

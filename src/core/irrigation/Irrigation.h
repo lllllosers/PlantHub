@@ -62,6 +62,7 @@ enum class Rejection {
     None, InvalidConfig, NotReady, InvalidRequest, ModeMismatch, InvalidTime, CrossesMidnight,
     CriticalState, SaveFailed, FaultLocked, AutoPaused, Busy, StaleTrigger, Cooling,
     SingleLimit, DailyLimit, Duration, ClockRange, BindingChanged, Capacity, Duplicate, RequestConflict,
+    OutsideAutoWindow,
 };
 
 struct Decision {
@@ -135,8 +136,10 @@ enum class StopEvidence { NeverStarted, Measured, Unknown };
 
 struct PumpStopped {
     ExecutionId executionId = 0;
+    // Measured 为实际停止时刻。其他证据为确认关闭的时刻。均使用本次启动周期的单调时间。
     MonotonicMs stoppedAtMs = 0;
     StopEvidence evidence = StopEvidence::Unknown;
+    // Measured 须为正值，NeverStarted 为空或零，Unknown 须为空。
     std::optional<DurationMs> durationMs;
 };
 
@@ -162,7 +165,7 @@ public:
 
     void observeTime(const SystemConfig& config, ClockSample sample);
     void observeSoil(const SystemConfig& config, EntityId zoneId, const SensorReading* reading);
-    // 在影响规则、探头、采集间隔或自动模式的配置变化后调用。
+    // 在影响规则、探头、采集间隔、自动模式或全局自动灌溉时段的配置变化后调用。
     void resetAutomatic();
 
     Decision accept(const SystemConfig& config, const IrrigationRequest& request);
@@ -193,6 +196,7 @@ private:
     struct GroupRun {
         RequestId id = 0;
         std::size_t member = 0;
+        LocalDay quotaDay = 0;
     };
 
     struct SoilProgress {
@@ -209,6 +213,7 @@ private:
     void recoverPending();
     void observeSchedule(const SystemConfig& config, bool continuous, bool enteredNextMinute);
     void clearAutomatic();
+    void cancelUnstartedAutomatic();
     void cancelCandidate(EntityId zoneId, IrrigationSource source);
     void addCandidate(IrrigationRequest request);
     Decision check(const SystemConfig& config, const IrrigationRequest& request, IrrigationPlan& plan,
@@ -218,7 +223,8 @@ private:
     void finishGroup(IrrigationResult result);
     void enforceDeadline(MonotonicMs now);
     void requestStop(StopReason reason);
-    void settle(StopEvidence evidence, std::optional<DurationMs> duration, MonotonicMs endMs);
+    void settle(StopEvidence evidence, std::optional<DurationMs> duration, MonotonicMs endMs,
+                MonotonicMs confirmedElapsedMs = 0);
     void rememberWatering(const IrrigationPlan& plan, MonotonicMs endMs);
 
     ChannelCapabilities channels_;
