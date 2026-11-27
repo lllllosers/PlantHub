@@ -9,9 +9,10 @@ namespace {
 
 constexpr int minutesPerDay = 1'440;
 constexpr int secondsPerDay = 86'400;
-constexpr MonotonicMs dateConfirmationMs = 60'000;
 
-bool follows(const ClockSample& before, const ClockSample& after) {
+}  // namespace
+
+bool consistentClockSamples(const ClockSample& before, const ClockSample& after) {
     if (!before.utc || !after.utc || *after.utc < *before.utc || after.monotonicMs < before.monotonicMs) {
         return false;
     }
@@ -19,8 +20,6 @@ bool follows(const ClockSample& before, const ClockSample& after) {
     const auto elapsed = (after.monotonicMs - before.monotonicMs) / 1'000;
     return wall >= elapsed ? wall - elapsed <= 1 : elapsed - wall <= 1;
 }
-
-}  // namespace
 
 std::optional<LocalTime> localTime(UtcSeconds utc, std::int16_t offsetMinutes) {
     if (offsetMinutes <= -minutesPerDay || offsetMinutes >= minutesPerDay) {
@@ -77,15 +76,15 @@ void Irrigation::observeTime(const SystemConfig& config, ClockSample sample) {
     if (!autoAllowed) {
         cancelUnstartedAutomatic();
     }
-    const bool followsPrevious = !offsetChanged && previousClock_ && follows(*previousClock_, sample);
-    const bool continuous = followsPrevious && continuityAnchor_ && follows(*continuityAnchor_, sample);
+    const bool followsPrevious = !offsetChanged && previousClock_ && consistentClockSamples(*previousClock_, sample);
+    const bool continuous = followsPrevious && continuityAnchor_ && consistentClockSamples(*continuityAnchor_, sample);
     if (!continuous) {
         continuityAnchor_ = sample;
         clearAutomatic();
     }
 
     const bool enteredNextMinute = continuous && now_ > previousClock_->monotonicMs &&
-        now_ - previousClock_->monotonicMs < dateConfirmationMs && previousLocal &&
+        now_ - previousClock_->monotonicMs < clockConfirmationMs && previousLocal &&
         ((previousLocal->day == local_->day && local_->minute == previousLocal->minute + 1) ||
          (local_->day == previousLocal->day + 1 && previousLocal->minute == minutesPerDay - 1 && local_->minute == 0));
     previousClock_ = sample;
@@ -108,7 +107,7 @@ void Irrigation::observeTime(const SystemConfig& config, ClockSample sample) {
         }
         if (local_->day > date.day) {
             if (pinned.day <= date.day || phase_ != Phase::Idle || dirty_ || inFlight_ ||
-                now_ - continuityAnchor_->monotonicMs < dateConfirmationMs) {
+                now_ - continuityAnchor_->monotonicMs < clockConfirmationMs) {
                 clearAutomatic();
                 return;
             }

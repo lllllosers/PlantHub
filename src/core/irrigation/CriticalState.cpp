@@ -177,8 +177,8 @@ void Irrigation::recoverPending() {
     }
 }
 
-std::optional<SaveDraft> Irrigation::beginSave() {
-    if (!available() || !dirty_ || inFlight_) {
+std::optional<SaveDraft> Irrigation::beginSave(bool metadataChanged) {
+    if (!available() || (!dirty_ && !metadataChanged) || inFlight_) {
         return std::nullopt;
     }
     if (lastSaveId_ == std::numeric_limits<SaveId>::max()) {

@@ -32,8 +32,8 @@ $plantHubPio = Join-Path $env:PLATFORMIO_CORE_DIR 'penv\Scripts\pio.exe'
 & $plantHubPio test -e native
 ```
 
-- `planthub_rev_b` 编译 `src/` 中的固件源码。嵌入式测试筛选在 `test/embedded/` 下，随实物验证需求添加。当前 `main.cpp` 只完成 Arduino 入口及空闲等待，链接器可移除未被引用的 Core 实现。
-- `native` 以测试命令为入口，编译 `src/core/` 并运行 `test/native/` 下的 Unity 测试。配置、标定与灌溉用例直接链接正式 Core 源码。灌溉测试注入时间、读数、设备事件和保存结果，验证停泵请求及互斥的业务语义。工具链冒烟测试继续核对 C++17 和 Unity。M1-C 引入可移植的 Application 服务后，按实际用途将其纳入 Native 编译和测试范围。
+- `planthub_rev_b` 编译 `src/` 中的固件源码。当前 `main.cpp` 只完成 Arduino 入口及空闲等待，链接器可移除未被引用的 Core 和 Application 实现。此时的 Flash 和 RAM 数据用于构建基线，实际设备装配后的占用由后续阶段测定。嵌入式测试随实物验证需求添加。
+- `native` 编译正式 `src/core/` 与 `src/application/`，运行 `test/native/` 下的 Unity 测试。`test_application/` 以模拟时钟、设备和存储验证启动确认、停止撤销、在途写入和两盆植物闭环。模拟代码仅参与主机测试。真实跨线程停止、泵驱动有效电平和硬件限时、NVS 掉电一致性及实际存储异常由 M2 验证。
 - 两个环境都通过编译期断言核验 C++17。固件使用 `-std=gnu++17`，以支持 ESP-IDF 头文件的 `typeof` 和 FreeRTOS 的可变参数宏扩展。Native 使用 `-std=c++17` 验证可移植源码。固件构建须检查 APP 限额、Flash/RAM 和警告，使用框架分区工具核对 [分区文件](../partitions.csv) 及生成的表。主机测试须检查编译器、测试计数及实际编译的源码。
 - 工具链迁移验收先执行 `& $plantHubPio run -e planthub_rev_b -e native -t clean` 清理两项构建产物，再运行上面的构建和测试，核对实际编译命令。保留 `.pio/libdeps/` 中的项目库缓存。
 - 硬件候选配置及实物验收范围见 [Rev B 硬件基线](../hardware/rev-b/README.md)。烧录和实物试验按其中的授权约束执行。

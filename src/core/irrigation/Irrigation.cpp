@@ -244,6 +244,18 @@ Decision Irrigation::acceptGroup(const SystemConfig& config, RequestId id, Entit
     if (!id || !groupId || orderedDoses.size() > CriticalState::maxTrackedZones) {
         return {Rejection::InvalidRequest};
     }
+    const auto previous = findReceipt(state_.manualReceipts, id);
+    if (previous != state_.manualReceipts.end()) {
+        if (previous->groupId != groupId || previous->doses.size() != orderedDoses.size()) {
+            return {Rejection::RequestConflict};
+        }
+        // 重试属于原请求，使用首次受理时冻结的成员顺序。
+        auto doses = previous->doses;
+        for (std::size_t index = 0; index < doses.size(); ++index) {
+            doses[index].volumeMl = orderedDoses[index];
+        }
+        return duplicate(id, groupId, doses);
+    }
     if (validateConfig(config, channels_).error != ConfigError::None) {
         return {Rejection::InvalidConfig};
     }
@@ -254,9 +266,6 @@ Decision Irrigation::acceptGroup(const SystemConfig& config, RequestId id, Entit
     std::vector<ZoneDose> doses;
     for (std::size_t index = 0; index < orderedDoses.size(); ++index) {
         doses.push_back({group->zoneIds[index], orderedDoses[index]});
-    }
-    if (const auto previous = duplicate(id, groupId, doses); !previous) {
-        return previous;
     }
     if (group_) {
         return {Rejection::Busy};
@@ -486,7 +495,7 @@ bool Irrigation::confirmStopped(PumpStopped event) {
             requestStop(*event.durationMs >= permit.plan.plannedMs ? StopReason::Planned : StopReason::DeviceFault);
         }
     }
-    settle(event.evidence, event.durationMs, std::max(now_, event.stoppedAtMs), confirmedElapsedMs);
+    settle(event.evidence, event.durationMs, event.stoppedAtMs, confirmedElapsedMs);
     return true;
 }
 

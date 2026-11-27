@@ -24,6 +24,9 @@ struct ClockSample {
     std::optional<UtcSeconds> utc;
 };
 
+inline constexpr MonotonicMs clockConfirmationMs = 60'000;
+bool consistentClockSamples(const ClockSample& before, const ClockSample& after);
+
 struct Trigger {
     LocalDay day = 0;
     std::uint16_t minute = 0;
@@ -155,11 +158,12 @@ public:
     Recovery recoveryStatus() const { return recovery_; }
     Phase phase() const { return phase_; }
     bool groupActive() const { return group_.has_value(); }
+    bool stateReliable() const { return available() && !dirty_ && !inFlight_ && !saveFailed_; }
     std::optional<IrrigationPlan> activePlan() const;
     std::optional<VolumeMl> remaining(EntityId zoneId, VolumeMl dailyLimitMl) const;
 
-    // 单次只允许一个保存，确认对应快照。失败后可提交最新候选重试。
-    std::optional<SaveDraft> beginSave();
+    // 单次只允许一个保存，确认对应快照。应用元数据变更也可请求保存。
+    std::optional<SaveDraft> beginSave(bool metadataChanged = false);
     bool finishSave(SaveId id, bool reliable);
     std::optional<IrrigationRecord> takeRecord();
 
